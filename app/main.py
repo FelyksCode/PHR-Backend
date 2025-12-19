@@ -5,10 +5,12 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import engine, get_db
-from app.models import User
+from app.models import User, VendorIntegration, OAuthToken
 from app.models.user import Base
-from app.routers import auth_router, users_router, fhir_router
+from app.routers import auth_router, users_router, fhir_router, integrations_router, fitbit_router, health_router
 from app.services.user_service import user_service
+from app.fhir.client import fhir_client
+import httpx
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -62,6 +64,9 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(fhir_router)
+app.include_router(integrations_router)
+app.include_router(fitbit_router)
+app.include_router(health_router)
 
 @app.get("/")
 async def root():
@@ -75,8 +80,36 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy"}
+    """Health check endpoint with FHIR connection status"""
+    health_status = {
+        "status": "healthy",
+        "database": "connected",
+        "fhir": {
+            "url": settings.fhir_base_url,
+            "status": "unknown"
+        }
+    }
+    
+    # Check FHIR server connection
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{settings.fhir_base_url}/metadata")
+            if response.status_code == 200:
+                health_status["fhir"]["status"] = "connected"
+            else:
+                health_status["fhir"]["status"] = "unreachable"
+                health_status["status"] = "degraded"
+    except httpx.TimeoutException:
+        health_status["fhir"]["status"] = "timeout"
+        health_status["status"] = "degraded"
+    except httpx.ConnectError:
+        health_status["fhir"]["status"] = "disconnected"
+        health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["fhir"]["status"] = f"error: {str(e)}"
+        health_status["status"] = "degraded"
+    
+    return health_status
 
 if __name__ == "__main__":
     import uvicorn

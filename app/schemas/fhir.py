@@ -24,6 +24,18 @@ class FHIRObservation(FHIRResource):
     valueString: Optional[str] = None
     component: Optional[list] = None
 
+class FHIRCondition(FHIRResource):
+    resourceType: str = "Condition"
+    code: Dict[str, Any]  # CodeableConcept with SNOMED code
+    clinicalStatus: Dict[str, Any]  # active | recurrence | relapse | inactive | remission | resolved | unknown
+    category: Optional[list] = None  # CodeableConcept category
+    severity: Optional[Dict[str, Any]] = None  # CodeableConcept (mild/moderate/high)
+    subject: Dict[str, Any]  # Reference to Patient
+    onsetDateTime: Optional[str] = None  # When condition started
+    recordedDate: Optional[str] = None  # When condition was first recorded
+    recorder: Optional[Dict[str, Any]] = None  # Who recorded the condition
+    note: Optional[list] = None  # Additional notes
+
 class FHIRResponse(BaseModel):
     resourceType: str
     id: str

@@ -120,6 +120,32 @@ class FHIRClient:
     async def get_resource(self, resource_type: str, resource_id: str) -> Dict[str, Any]:
         """Get any FHIR resource by type and ID"""
         return await self._make_request("GET", f"{resource_type}/{resource_id}")
+    
+    # Condition-specific methods
+    async def create_condition(self, condition_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new Condition resource"""
+        return await self._make_request("POST", "Condition", condition_data)
+    
+    async def get_conditions(self, patient_id: Optional[str] = None, **params) -> Dict[str, Any]:
+        """Get Condition resources with optional filtering"""
+        query_params = {}
+        if patient_id:
+            query_params["patient"] = patient_id
+        query_params.update(params)
+        
+        return await self._make_request("GET", "Condition", params=query_params)
+    
+    async def get_condition(self, condition_id: str) -> Dict[str, Any]:
+        """Get Condition resource by ID"""
+        return await self._make_request("GET", f"Condition/{condition_id}")
+    
+    async def update_condition(self, condition_id: str, condition_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Update Condition resource"""
+        return await self._make_request("PUT", f"Condition/{condition_id}", condition_data)
+    
+    async def delete_condition(self, condition_id: str) -> Dict[str, Any]:
+        """Delete Condition resource"""
+        return await self._make_request("DELETE", f"Condition/{condition_id}")
 
 # Global FHIR client instance
 fhir_client = FHIRClient()

@@ -1,14 +1,17 @@
 # PHR Backend API
 
-A production-ready FastAPI backend for Personal Health Records (PHR) with FHIR integration.
+A production-ready FastAPI backend for Personal Health Records (PHR) with FHIR integration and wearable device support.
 
 ## Features
 
 - **Authentication**: JWT-based auth with user registration and login
 - **User Management**: Complete CRUD operations with role-based access control
 - **FHIR Integration**: Seamless integration with HAPI FHIR server
+- **Fitbit Integration**: OAuth-based health data sync from Fitbit devices 🆕
+- **Vendor-Agnostic API**: Standardized health data endpoints
+- **Background Sync**: Automated health data synchronization
 - **Database**: SQLAlchemy with PostgreSQL/SQLite support
-- **Security**: Password hashing with bcrypt
+- **Security**: Password hashing, token encryption, OAuth 2.0
 - **API Documentation**: Automatic OpenAPI/Swagger documentation
 
 ## Tech Stack
@@ -19,9 +22,28 @@ A production-ready FastAPI backend for Personal Health Records (PHR) with FHIR i
 - **PostgreSQL/SQLite** - Database options
 - **JWT** - Authentication tokens
 - **Bcrypt** - Password hashing
+- **Fernet** - Token encryption
 - **Pydantic** - Data validation
-- **httpx** - Async HTTP client for FHIR communication
+- **httpx** - Async HTTP client for FHIR and Fitbit communication
 - **Alembic** - Database migrations
+
+## 🆕 Fitbit Integration
+
+The PHR backend now supports Fitbit integration using Google Account OAuth. See:
+
+- **[Fitbit Quick Start Guide](docs/FITBIT_QUICKSTART.md)** - Get started in minutes
+- **[Fitbit Integration Documentation](docs/FITBIT_INTEGRATION.md)** - Complete technical details
+- **[Implementation Summary](docs/IMPLEMENTATION_SUMMARY.md)** - What was built
+
+### Key Capabilities
+
+- ✅ OAuth 2.0 with Google Account
+- ✅ Automatic token refresh
+- ✅ Heart rate, SpO2, weight, activity data
+- ✅ FHIR Observation mapping (LOINC codes)
+- ✅ Vendor-agnostic API for mobile apps
+- ✅ Background data synchronization
+- ✅ Encrypted token storage
 
 ## Project Structure
 
@@ -34,20 +56,31 @@ phr_backend/
 │   ├── database.py          # Database connection and session
 │   ├── models/              # SQLAlchemy models
 │   │   ├── __init__.py
-│   │   └── user.py
+│   │   ├── user.py
+│   │   └── vendor_integration.py    # 🆕 Vendor & OAuth models
 │   ├── schemas/             # Pydantic schemas
 │   │   ├── __init__.py
 │   │   ├── user.py
-│   │   └── fhir.py
+│   │   ├── fhir.py
+│   │   └── vendor.py        # 🆕 Vendor integration schemas
 │   ├── auth/                # Authentication utilities
 │   │   ├── __init__.py
 │   │   └── auth.py
 │   ├── services/            # Business logic services
 │   │   ├── __init__.py
-│   │   └── user_service.py
+│   │   ├── user_service.py
+│   │   ├── encryption.py              # 🆕 Token encryption
+│   │   ├── vendor_integration_service.py  # 🆕
+│   │   ├── oauth_token_service.py     # 🆕
+│   │   ├── fitbit_service.py          # 🆕 Fitbit API client
+│   │   ├── fhir_mapper.py             # 🆕 FHIR mapping
+│   │   └── sync_service.py            # 🆕 Data sync
 │   ├── routers/             # API route handlers
 │   │   ├── __init__.py
 │   │   ├── auth.py
+│   │   ├── integrations.py  # 🆕 Vendor selection
+│   │   ├── fitbit.py        # 🆕 Fitbit OAuth
+│   │   └── health.py        # 🆕 Health observations
 │   │   ├── users.py
 │   │   └── fhir.py
 │   └── fhir/                # FHIR client and utilities
