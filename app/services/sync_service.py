@@ -56,6 +56,14 @@ class SyncService:
             return sync_result
         
         try:
+            # Get integration to access last_sync_at
+            integration = vendor_integration_service.get_integration(
+                db=db,
+                user_id=user.id,
+                vendor="fitbit"
+            )
+            last_sync_at = integration.last_sync_at if integration else None
+            
             # Fetch Fitbit data
             logger.info(f"Fetching Fitbit data for user {user.id} on {date_str}")
             fitbit_data = await fitbit_service.fetch_all_health_data(
@@ -71,7 +79,8 @@ class SyncService:
             if fitbit_data.get("heart_rate"):
                 hr_obs = fhir_mapper.map_fitbit_heart_rate(
                     patient_id=user.fhir_patient_id,
-                    fitbit_data=fitbit_data["heart_rate"]
+                    fitbit_data=fitbit_data["heart_rate"],
+                    last_sync_datetime=last_sync_at
                 )
                 all_observations.extend(hr_obs)
                 logger.debug(f"Mapped {len(hr_obs)} heart rate observations")
@@ -80,7 +89,8 @@ class SyncService:
             if fitbit_data.get("spo2"):
                 spo2_obs = fhir_mapper.map_fitbit_spo2(
                     patient_id=user.fhir_patient_id,
-                    fitbit_data=fitbit_data["spo2"]
+                    fitbit_data=fitbit_data["spo2"],
+                    last_sync_datetime=last_sync_at
                 )
                 all_observations.extend(spo2_obs)
                 logger.debug(f"Mapped {len(spo2_obs)} SpO2 observations")
@@ -89,7 +99,8 @@ class SyncService:
             if fitbit_data.get("body_weight"):
                 weight_obs = fhir_mapper.map_fitbit_weight(
                     patient_id=user.fhir_patient_id,
-                    fitbit_data=fitbit_data["body_weight"]
+                    fitbit_data=fitbit_data["body_weight"],
+                    last_sync_datetime=last_sync_at
                 )
                 all_observations.extend(weight_obs)
                 logger.debug(f"Mapped {len(weight_obs)} weight observations")
@@ -98,7 +109,8 @@ class SyncService:
             if fitbit_data.get("activity_summary"):
                 activity_obs = fhir_mapper.map_fitbit_activity(
                     patient_id=user.fhir_patient_id,
-                    fitbit_data=fitbit_data["activity_summary"]
+                    fitbit_data=fitbit_data["activity_summary"],
+                    last_sync_datetime=last_sync_at
                 )
                 all_observations.extend(activity_obs)
                 logger.debug(f"Mapped {len(activity_obs)} activity observations")
@@ -118,11 +130,6 @@ class SyncService:
                 sync_result["errors"].append("No health data available for the specified date")
             
             # Update last sync timestamp
-            integration = vendor_integration_service.get_integration(
-                db=db,
-                user_id=user.id,
-                vendor="fitbit"
-            )
             if integration:
                 vendor_integration_service.update_last_sync(db, integration.id)
         

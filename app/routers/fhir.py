@@ -143,8 +143,29 @@ async def create_condition(
     condition_data: Dict[str, Any],
     current_user: User = Depends(get_current_active_user)
 ):
-    """Create a new Condition (symptom) resource in FHIR server"""
-    # Ensure resource type is set
+    """Create a new Condition (symptom) resource in FHIR server
+    
+    Supports both individual Condition resources and FHIR Bundles with transaction type.
+    """
+    # Handle FHIR Bundle with transaction type
+    if condition_data.get("resourceType") == "Bundle" and condition_data.get("type") == "transaction":
+        if "entry" not in condition_data or not condition_data["entry"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Bundle must contain at least one entry"
+            )
+        
+        # Extract the Condition resource from the first entry
+        entry = condition_data["entry"][0]
+        if "resource" not in entry:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Entry must contain a resource"
+            )
+        
+        condition_data = entry["resource"]
+    
+    # Ensure resource type is set to Condition
     condition_data["resourceType"] = "Condition"
     
     # If subject is not specified and user has fhir_patient_id, use it

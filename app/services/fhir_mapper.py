@@ -49,6 +49,11 @@ class FHIRMapper:
             "code": "41953-1",
             "display": "Distance walked or run",
             "system": "http://loinc.org"
+        },
+        "blood_pressure": {
+            "code": "35094-2",
+            "display": "Blood Pressure Panel",
+            "system": "http://loinc.org"
         }
     }
     
@@ -122,7 +127,8 @@ class FHIRMapper:
     def map_fitbit_heart_rate(
         self,
         patient_id: str,
-        fitbit_data: Dict[str, Any]
+        fitbit_data: Dict[str, Any],
+        last_sync_datetime: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit heart rate data to FHIR Observations
@@ -130,6 +136,7 @@ class FHIRMapper:
         Args:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit heart rate response
+            last_sync_datetime: Last sync datetime to use for effectiveDateTime
             
         Returns:
             List of FHIR Observation resources
@@ -148,12 +155,14 @@ class FHIRMapper:
                 # Resting heart rate
                 resting_hr = value_data.get("restingHeartRate")
                 if resting_hr:
+                    # Use last_sync_datetime if available, otherwise use data date
+                    effective_dt = last_sync_datetime if last_sync_datetime else datetime.fromisoformat(date_str)
                     obs = self.create_observation(
                         patient_id=patient_id,
                         observation_type="heart_rate",
                         value=float(resting_hr),
                         unit="beats/min",
-                        effective_datetime=datetime.fromisoformat(date_str),
+                        effective_datetime=effective_dt,
                         additional_data={"type": "resting"}
                     )
                     observations.append(obs)
@@ -175,7 +184,8 @@ class FHIRMapper:
     def map_fitbit_spo2(
         self,
         patient_id: str,
-        fitbit_data: Dict[str, Any]
+        fitbit_data: Dict[str, Any],
+        last_sync_datetime: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit SpO2 data to FHIR Observations
@@ -183,6 +193,7 @@ class FHIRMapper:
         Args:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit SpO2 response
+            last_sync_datetime: Last sync datetime to use for effectiveDateTime
             
         Returns:
             List of FHIR Observation resources
@@ -196,12 +207,14 @@ class FHIRMapper:
             avg_spo2 = value_data.get("avg")
             
             if avg_spo2 and date_str:
+                # Use last_sync_datetime if available, otherwise use data date
+                effective_dt = last_sync_datetime if last_sync_datetime else datetime.fromisoformat(date_str)
                 obs = self.create_observation(
                     patient_id=patient_id,
                     observation_type="spo2",
                     value=float(avg_spo2),
                     unit="%",
-                    effective_datetime=datetime.fromisoformat(date_str),
+                    effective_datetime=effective_dt,
                     additional_data={
                         "min": value_data.get("min"),
                         "max": value_data.get("max")
@@ -217,7 +230,8 @@ class FHIRMapper:
     def map_fitbit_weight(
         self,
         patient_id: str,
-        fitbit_data: Dict[str, Any]
+        fitbit_data: Dict[str, Any],
+        last_sync_datetime: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit weight data to FHIR Observations
@@ -225,6 +239,7 @@ class FHIRMapper:
         Args:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit weight response
+            last_sync_datetime: Last sync datetime to use for effectiveDateTime
             
         Returns:
             List of FHIR Observation resources
@@ -240,15 +255,19 @@ class FHIRMapper:
                 time_str = log.get("time")
                 
                 if weight and date_str:
-                    # Combine date and time
-                    datetime_str = f"{date_str}T{time_str}" if time_str else date_str
+                    # Use last_sync_datetime if available, otherwise use data date/time
+                    if last_sync_datetime:
+                        effective_dt = last_sync_datetime
+                    else:
+                        datetime_str = f"{date_str}T{time_str}" if time_str else date_str
+                        effective_dt = datetime.fromisoformat(datetime_str)
                     
                     obs = self.create_observation(
                         patient_id=patient_id,
                         observation_type="body_weight",
                         value=float(weight),
                         unit="kg",
-                        effective_datetime=datetime.fromisoformat(datetime_str),
+                        effective_datetime=effective_dt,
                         additional_data={
                             "bmi": log.get("bmi"),
                             "source": log.get("source")
@@ -264,7 +283,8 @@ class FHIRMapper:
     def map_fitbit_activity(
         self,
         patient_id: str,
-        fitbit_data: Dict[str, Any]
+        fitbit_data: Dict[str, Any],
+        last_sync_datetime: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit activity data to FHIR Observations
@@ -272,6 +292,7 @@ class FHIRMapper:
         Args:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit activity response
+            last_sync_datetime: Last sync datetime to use for effectiveDateTime
             
         Returns:
             List of FHIR Observation resources
@@ -282,11 +303,14 @@ class FHIRMapper:
             summary = fitbit_data.get("summary", {})
             date_str = fitbit_data.get("activities", [{}])[0].get("startDate") if fitbit_data.get("activities") else None
             
-            if not date_str:
-                # Use current date as fallback
-                date_str = datetime.now().date().isoformat()
-            
-            effective_dt = datetime.fromisoformat(date_str)
+            # Use last_sync_datetime if available, otherwise use data date
+            if last_sync_datetime:
+                effective_dt = last_sync_datetime
+            else:
+                if not date_str:
+                    # Use current date as fallback
+                    date_str = datetime.now().date().isoformat()
+                effective_dt = datetime.fromisoformat(date_str)
             
             # Steps
             steps = summary.get("steps")
@@ -332,6 +356,91 @@ class FHIRMapper:
             logger.error(f"Error mapping Fitbit activity data: {str(e)}")
         
         return observations
+    
+    def map_blood_pressure(
+        self,
+        patient_id: str,
+        systolic: float,
+        diastolic: float,
+        effective_datetime: datetime,
+        additional_data: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Map blood pressure data to FHIR Observation with component structure
+        
+        Args:
+            patient_id: FHIR Patient ID
+            systolic: Systolic blood pressure value
+            diastolic: Diastolic blood pressure value
+            effective_datetime: When the measurement was taken
+            additional_data: Additional metadata
+            
+        Returns:
+            FHIR Observation resource with blood pressure components
+        """
+        observation = {
+            "resourceType": "Observation",
+            "status": "final",
+            "category": [{
+                "coding": [{
+                    "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                    "code": "vital-signs",
+                    "display": "Vital Signs"
+                }]
+            }],
+            "code": {
+                "coding": [{
+                    "system": "http://loinc.org",
+                    "code": "35094-2",
+                    "display": "Blood Pressure Panel"
+                }],
+                "text": "Blood Pressure Panel"
+            },
+            "subject": {
+                "reference": f"Patient/{patient_id}"
+            },
+            "effectiveDateTime": effective_datetime.isoformat(),
+            "component": [
+                {
+                    "code": {
+                        "coding": [{
+                            "system": "http://loinc.org",
+                            "code": "8480-6",
+                            "display": "Systolic Blood Pressure"
+                        }]
+                    },
+                    "valueQuantity": {
+                        "value": systolic,
+                        "unit": "mmHg",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "mm[Hg]"
+                    }
+                },
+                {
+                    "code": {
+                        "coding": [{
+                            "system": "http://loinc.org",
+                            "code": "8462-4",
+                            "display": "Diastolic Blood Pressure"
+                        }]
+                    },
+                    "valueQuantity": {
+                        "value": diastolic,
+                        "unit": "mmHg",
+                        "system": "http://unitsofmeasure.org",
+                        "code": "mm[Hg]"
+                    }
+                }
+            ]
+        }
+        
+        # Add additional metadata if provided
+        if additional_data:
+            observation["note"] = [{
+                "text": f"Source: Blood Pressure Device. Additional data: {str(additional_data)}"
+            }]
+        
+        return observation
     
     async def post_observations_to_fhir(
         self,

@@ -1,9 +1,22 @@
+from enum import Enum
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 
 class FHIRResource(BaseModel):
     resourceType: str
     id: Optional[str] = None
+
+
+class ObservationStatus(str, Enum):
+    REGISTERED = "registered"
+    PRELIMINARY = "preliminary"
+    FINAL = "final"
+    AMENDED = "amended"
+    CORRECTED = "corrected"
+    APPENDED = "appended"
+    CANCELLED = "cancelled"
+    ENTERED_IN_ERROR = "entered-in-error"
+    UNKNOWN = "unknown"
 
 class FHIRPatient(FHIRResource):
     resourceType: str = "Patient"
@@ -15,7 +28,7 @@ class FHIRPatient(FHIRResource):
 
 class FHIRObservation(FHIRResource):
     resourceType: str = "Observation"
-    status: str
+    status: ObservationStatus
     category: Optional[list] = None
     code: Dict[str, Any]
     subject: Dict[str, Any]

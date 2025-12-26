@@ -16,8 +16,11 @@ from app.models.user import User
 from app.config import settings
 from app.schemas.vendor import OAuthTokenResponse
 from app.services.vendor_integration_service import vendor_integration_service
+from app.models.vendor_integration import VendorIntegration
 from app.services.oauth_token_service import oauth_token_service
 import logging
+from jose import jwt, JWTError
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +34,75 @@ router = APIRouter(
 oauth_states = {}
 
 
+def _resolve_user_from_request(
+    request: Request,
+    db: Session,
+    token_query: Optional[str] = None
+) -> User:
+    """
+    Resolve authenticated user from either Bearer header or token query parameter.
+    Raises HTTP 403 if neither is provided or invalid.
+    """
+    # Try Authorization header first
+    auth_header = request.headers.get("Authorization")
+    token = None
+    if auth_header and auth_header.lower().startswith("bearer "):
+        token = auth_header.split(" ", 1)[1].strip()
+    elif token_query:
+        token = token_query.strip()
+
+    if not token:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Authorization required")
+
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        email: str = payload.get("sub")
+        if not email:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token: missing subject")
+    except JWTError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
+    return user
+
+
+def _generate_signed_state(email: str, integration_id: int) -> str:
+    """Generate a short-lived signed state JWT embedding the user identity."""
+    claims = {
+        "sub": email,
+        "integration_id": integration_id,
+        "iat": datetime.utcnow(),
+        "exp": datetime.utcnow() + timedelta(minutes=5),
+        "nonce": secrets.token_urlsafe(12),
+    }
+    return jwt.encode(claims, settings.secret_key, algorithm=settings.algorithm)
+
+
+def _validate_signed_state(state_token: str, db: Session) -> Optional[tuple]:
+    """
+    Validate signed state and return (user_id, integration_id) if valid.
+    Returns None if invalid.
+    """
+    try:
+        claims = jwt.decode(state_token, settings.secret_key, algorithms=[settings.algorithm])
+        email = claims.get("sub")
+        integration_id = claims.get("integration_id")
+        if not email or not integration_id:
+            return None
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            return None
+        return (user.id, int(integration_id))
+    except JWTError:
+        return None
+
+
 @router.get("/authorize")
 async def fitbit_authorize(
-    current_user: User = Depends(get_current_user),
+    request: Request,
+    token: Optional[str] = Query(None, description="JWT token when no Authorization header is available"),
     db: Session = Depends(get_db)
 ):
     """
@@ -49,6 +118,9 @@ async def fitbit_authorize(
     Returns:
         Redirect to Fitbit OAuth page
     """
+    # Resolve current user from header or query token
+    current_user = _resolve_user_from_request(request, db, token_query=token)
+
     # Verify Fitbit credentials are configured
     if not settings.fitbit_client_id or not settings.fitbit_client_secret:
         raise HTTPException(
@@ -69,12 +141,10 @@ async def fitbit_authorize(
             detail="Please select Fitbit vendor first using POST /integrations/vendors/select"
         )
     
-    # Generate state token for CSRF protection
-    state = secrets.token_urlsafe(32)
-    oauth_states[state] = {
-        "user_id": current_user.id,
-        "integration_id": integration.id
-    }
+    # Generate signed, short-lived state containing user identity
+    state = _generate_signed_state(current_user.email, integration.id)
+    # Also keep a transient mapping to support multi-process scenarios
+    oauth_states[state] = {"user_id": current_user.id, "integration_id": integration.id}
     
     # Build authorization URL
     params = {
@@ -88,6 +158,43 @@ async def fitbit_authorize(
     auth_url = f"{settings.fitbit_oauth_url}?{urlencode(params)}"
     
     return RedirectResponse(url=auth_url)
+
+
+@router.get("/authorize/url")
+async def fitbit_authorize_url(
+    request: Request,
+    token: Optional[str] = Query(None, description="JWT token when no Authorization header is available"),
+    db: Session = Depends(get_db)
+):
+    """
+    Return the Fitbit OAuth authorization URL embedding a signed state token.
+    Useful for clients that need the URL instead of a redirect.
+    """
+    current_user = _resolve_user_from_request(request, db, token_query=token)
+
+    integration = vendor_integration_service.get_integration(
+        db=db,
+        user_id=current_user.id,
+        vendor="fitbit"
+    )
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Please select Fitbit vendor first using POST /integrations/vendors/select"
+        )
+
+    state = _generate_signed_state(current_user.email, integration.id)
+    oauth_states[state] = {"user_id": current_user.id, "integration_id": integration.id}
+
+    params = {
+        "response_type": "code",
+        "client_id": settings.fitbit_client_id,
+        "redirect_uri": settings.fitbit_redirect_uri,
+        "scope": "activity heartrate oxygen_saturation weight profile",
+        "state": state
+    }
+    auth_url = f"{settings.fitbit_oauth_url}?{urlencode(params)}"
+    return {"url": auth_url}
 
 
 @router.get("/callback")
@@ -110,17 +217,35 @@ async def fitbit_callback(
     Returns:
         Success message with token information
     """
-    # Verify state token
-    if state not in oauth_states:
+    # Verify state token (prefer signed state, fallback to transient store)
+    validated = _validate_signed_state(state, db)
+    if validated:
+        user_id, integration_id = validated
+        # Remove transient mapping if present
+        if state in oauth_states:
+            oauth_states.pop(state, None)
+    else:
+        if state not in oauth_states:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired state token"
+            )
+        oauth_data = oauth_states.pop(state)
+        user_id = oauth_data["user_id"]
+        integration_id = oauth_data["integration_id"]
+    
+    # Verify integration belongs to the resolved user
+    integration = db.query(VendorIntegration).filter(
+        VendorIntegration.id == integration_id,
+        VendorIntegration.user_id == user_id,
+        VendorIntegration.vendor == "fitbit"
+    ).first()
+    if not integration:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired state token"
+            detail="Integration not found for user"
         )
-    
-    oauth_data = oauth_states.pop(state)
-    user_id = oauth_data["user_id"]
-    integration_id = oauth_data["integration_id"]
-    
+
     # Exchange code for tokens
     try:
         # Prepare Basic Auth header
