@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     
     # Environment
     environment: str = os.getenv("ENVIRONMENT", "development")
+
+    # Sync worker
+    sync_poll_interval_seconds: int = int(os.getenv("SYNC_POLL_INTERVAL_SECONDS", "3"))
+    # How often the worker checks whether it should enqueue scheduled syncs
+    sync_schedule_tick_seconds: int = int(os.getenv("SYNC_SCHEDULE_TICK_SECONDS", "60"))
+    # Minimum hours between scheduled sync runs per integration
+    sync_scheduled_min_hours_between_runs: int = int(os.getenv("SYNC_SCHEDULED_MIN_HOURS_BETWEEN_RUNS", "24"))
     
     class Config:
         env_file = ".env"

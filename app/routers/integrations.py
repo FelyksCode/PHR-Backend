@@ -12,6 +12,8 @@ from app.models.vendor_integration import VendorIntegration
 from app.schemas.vendor import (
     VendorSelectionRequest,
     VendorSelectionResponse,
+    VendorDisconnectRequest,
+    VendorDisconnectResponse,
     VendorIntegrationListResponse,
     VendorIntegrationInfo,
     VendorType
@@ -65,6 +67,64 @@ async def select_vendor(
         )
 
 
+@router.post("/vendors/disconnect", response_model=VendorDisconnectResponse)
+async def disconnect_vendor(
+    request: VendorDisconnectRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Disconnect a vendor integration for the authenticated user
+    
+    Deactivates the vendor integration and removes all associated OAuth tokens.
+    This will stop data syncing and revoke access to the vendor's API.
+    
+    Args:
+        request: Vendor disconnect request containing vendor type
+        current_user: Authenticated user
+        db: Database session
+        
+    Returns:
+        VendorDisconnectResponse with disconnection confirmation
+    """
+    # Check if integration exists
+    integration = vendor_integration_service.get_integration(
+        db=db,
+        user_id=current_user.id,
+        vendor=request.vendor.value
+    )
+    
+    if not integration:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No {request.vendor.value} integration found for this user"
+        )
+    
+    if not integration.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{request.vendor.value} integration is already disconnected"
+        )
+    
+    # Disconnect the integration
+    success = vendor_integration_service.disconnect_integration(
+        db=db,
+        user_id=current_user.id,
+        vendor=request.vendor.value
+    )
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to disconnect {request.vendor.value} integration"
+        )
+    
+    return VendorDisconnectResponse(
+        message=f"Successfully disconnected {request.vendor.value} integration",
+        vendor=request.vendor.value
+    )
+
+
 @router.get("/vendors", response_model=VendorIntegrationListResponse)
 async def list_vendor_integrations(
     active_only: bool = Query(True, description="Only return active integrations"),
@@ -87,18 +147,43 @@ async def list_vendor_integrations(
         user_id=current_user.id,
         active_only=active_only
     )
-    
-    integration_infos = [
-        VendorIntegrationInfo(
-            id=integration.id,
-            vendor=integration.vendor,
-            is_active=integration.is_active,
-            last_sync_at=integration.last_sync_at,
-            created_at=integration.created_at
+
+    # Convert last_sync_at from UTC to the user's timezone before returning
+    user_tz_name = current_user.timezone or "UTC"
+    try:
+        import pytz
+        user_tz = pytz.timezone(user_tz_name)
+    except Exception:
+        # Fallback safely to UTC if timezone is invalid
+        import pytz
+        user_tz = pytz.timezone("UTC")
+
+    integration_infos = []
+    for integration in integrations:
+        last_sync_at_local = None
+        if integration.last_sync_at is not None:
+            # Ensure the datetime is timezone-aware in UTC, then convert
+            try:
+                if integration.last_sync_at.tzinfo is None:
+                    import pytz
+                    last_sync_at_utc = pytz.UTC.localize(integration.last_sync_at)
+                else:
+                    last_sync_at_utc = integration.last_sync_at
+                last_sync_at_local = last_sync_at_utc.astimezone(user_tz)
+            except Exception:
+                # If conversion fails, leave as original value
+                last_sync_at_local = integration.last_sync_at
+
+        integration_infos.append(
+            VendorIntegrationInfo(
+                id=integration.id,
+                vendor=integration.vendor,
+                is_active=integration.is_active,
+                last_sync_at=last_sync_at_local,
+                created_at=integration.created_at,
+            )
         )
-        for integration in integrations
-    ]
-    
+
     return VendorIntegrationListResponse(integrations=integration_infos)
 
 

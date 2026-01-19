@@ -1,7 +1,6 @@
-"""
-Health data endpoints - vendor-agnostic API for consuming health observations
-"""
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+"""Health data endpoints - vendor-agnostic API for consuming health observations."""
+
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 import httpx
@@ -12,7 +11,8 @@ from app.auth.auth import get_current_user
 from app.models.user import User
 from app.config import settings
 from app.schemas.vendor import HealthObservationsResponse, HealthObservation
-from app.services.sync_service import sync_service
+from app.services.sync_job_service import sync_job_service
+from app.services.vendor_integration_service import vendor_integration_service
 import logging
 
 logger = logging.getLogger(__name__)
@@ -164,7 +164,6 @@ async def get_health_observations(
 
 @router.post("/sync")
 async def sync_health_data(
-    background_tasks: BackgroundTasks,
     date_str: Optional[str] = Query(None, description="Date to sync (YYYY-MM-DD), defaults to today"),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -194,18 +193,19 @@ async def sync_health_data(
                 detail="Invalid date format. Use YYYY-MM-DD"
             )
     
-    # Add sync task to background
-    background_tasks.add_task(
-        sync_service.sync_user_vendors,
-        db=db,
-        user_id=current_user.id,
-        date_str=date_str
-    )
-    
+    # Architecture rule: do not pull vendor APIs inline.
+    # Enqueue vendor sync jobs and return immediately.
+    integrations = vendor_integration_service.get_user_integrations(db=db, user_id=current_user.id, active_only=True)
+    job_ids = []
+    for integ in integrations:
+        job = sync_job_service.enqueue(db, user_id=current_user.id, vendor=integ.vendor, trigger="manual")
+        job_ids.append({"vendor": integ.vendor, "sync_job_id": job.id})
+
     return {
-        "message": "Health data sync initiated",
+        "message": "Health data sync enqueued",
         "user_id": current_user.id,
-        "date": date_str or date.today().isoformat()
+        "date": date_str or date.today().isoformat(),
+        "jobs": job_ids,
     }
 
 
@@ -239,11 +239,16 @@ async def sync_health_data_immediate(
                 detail="Invalid date format. Use YYYY-MM-DD"
             )
     
-    # Perform sync immediately
-    result = await sync_service.sync_user_vendors(
-        db=db,
-        user_id=current_user.id,
-        date_str=date_str
-    )
-    
-    return result
+    # Kept for backward compatibility, but now behaves like an enqueue-only signal.
+    integrations = vendor_integration_service.get_user_integrations(db=db, user_id=current_user.id, active_only=True)
+    job_ids = []
+    for integ in integrations:
+        job = sync_job_service.enqueue(db, user_id=current_user.id, vendor=integ.vendor, trigger="manual")
+        job_ids.append({"vendor": integ.vendor, "sync_job_id": job.id})
+
+    return {
+        "message": "Health data sync enqueued",
+        "user_id": current_user.id,
+        "date": date_str or date.today().isoformat(),
+        "jobs": job_ids,
+    }

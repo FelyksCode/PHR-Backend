@@ -101,11 +101,19 @@ class UserService:
     
     @staticmethod
     def delete_user(db: Session, user_id: int) -> bool:
-        """Delete user"""
+        """Delete user and all associated vendor integrations"""
         db_user = UserService.get_user_by_id(db, user_id)
         if not db_user:
             return False
         
+        # Delete all vendor integrations (and their OAuth tokens via cascade)
+        # This is handled by the cascade delete on the relationship, but we can also do it explicitly
+        from app.models.vendor_integration import VendorIntegration
+        db.query(VendorIntegration).filter(
+            VendorIntegration.user_id == user_id
+        ).delete(synchronize_session=False)
+        
+        # Delete the user
         db.delete(db_user)
         db.commit()
         

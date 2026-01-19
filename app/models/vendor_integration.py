@@ -1,6 +1,5 @@
-"""
-Database models for vendor integrations and OAuth tokens
-"""
+"""Database models for vendor integrations and OAuth tokens."""
+
 from sqlalchemy import Boolean, Column, Integer, String, DateTime, ForeignKey, Text
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -19,11 +18,22 @@ class VendorIntegration(Base):
     vendor = Column(String, nullable=False)  # e.g., "fitbit", "apple_health", etc.
     is_active = Column(Boolean, default=True)
     last_sync_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Sync metadata (vendor-agnostic)
+    # - vendor_user_id: the user's ID in the vendor system (e.g., Fitbit user_id)
+    # - last_successful_sync_at: last time ingestion completed successfully
+    # - sync_status: idle | queued | running | success | failed
+    # - sync_job_id: last enqueued/running/completed job id
+    vendor_user_id = Column(String, nullable=True)
+    last_successful_sync_at = Column(DateTime(timezone=True), nullable=True)
+    sync_status = Column(String, nullable=False, default="idle")
+    sync_job_id = Column(String, nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # Relationships
-    user = relationship("User", backref="vendor_integrations")
+    user = relationship("User", back_populates="vendor_integrations")
     oauth_tokens = relationship("OAuthToken", back_populates="vendor_integration", cascade="all, delete-orphan")
 
 

@@ -27,6 +27,20 @@ class VendorSelectionResponse(BaseModel):
         from_attributes = True
 
 
+class VendorDisconnectRequest(BaseModel):
+    """Request body for disconnecting a vendor"""
+    vendor: VendorType = Field(..., description="Health data vendor to disconnect")
+
+
+class VendorDisconnectResponse(BaseModel):
+    """Response after disconnecting a vendor"""
+    message: str
+    vendor: str
+    
+    class Config:
+        from_attributes = True
+
+
 class OAuthTokenResponse(BaseModel):
     """Response after successful OAuth"""
     message: str

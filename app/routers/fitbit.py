@@ -3,6 +3,7 @@ Fitbit OAuth integration endpoints
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request
 from fastapi.responses import RedirectResponse
+import pytz
 from sqlalchemy.orm import Session
 import httpx
 import secrets
@@ -70,11 +71,12 @@ def _resolve_user_from_request(
 
 def _generate_signed_state(email: str, integration_id: int) -> str:
     """Generate a short-lived signed state JWT embedding the user identity."""
+    jakarta_tz = pytz.timezone('UTC')
     claims = {
         "sub": email,
         "integration_id": integration_id,
-        "iat": datetime.utcnow(),
-        "exp": datetime.utcnow() + timedelta(minutes=5),
+        "iat": datetime.now(jakarta_tz),
+        "exp": datetime.now(jakarta_tz) + timedelta(minutes=5),
         "nonce": secrets.token_urlsafe(12),
     }
     return jwt.encode(claims, settings.secret_key, algorithm=settings.algorithm)
@@ -151,7 +153,7 @@ async def fitbit_authorize(
         "response_type": "code",
         "client_id": settings.fitbit_client_id,
         "redirect_uri": settings.fitbit_redirect_uri,
-        "scope": "activity heartrate oxygen_saturation weight profile",
+        "scope": "activity heartrate oxygen_saturation weight profile sleep respiratory_rate",
         "state": state
     }
     
@@ -190,7 +192,7 @@ async def fitbit_authorize_url(
         "response_type": "code",
         "client_id": settings.fitbit_client_id,
         "redirect_uri": settings.fitbit_redirect_uri,
-        "scope": "activity heartrate oxygen_saturation weight profile",
+        "scope": "activity heartrate oxygen_saturation weight profile sleep respiratory_rate",
         "state": state
     }
     auth_url = f"{settings.fitbit_oauth_url}?{urlencode(params)}"

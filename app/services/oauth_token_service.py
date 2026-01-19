@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from app.models.vendor_integration import OAuthToken
+from app.models.vendor_integration import VendorIntegration
 from app.services.encryption import token_encryption
 
 
@@ -50,6 +51,16 @@ class OAuthTokenService:
         existing_token = db.query(OAuthToken).filter(
             OAuthToken.vendor_integration_id == vendor_integration_id
         ).first()
+
+        # Persist vendor user id on the integration as sync metadata.
+        # This keeps OAuth tokens server-side while still exposing vendor_user_id
+        # in sync status without leaking tokens.
+        if user_id_from_vendor:
+            integration = db.query(VendorIntegration).filter(
+                VendorIntegration.id == vendor_integration_id
+            ).first()
+            if integration:
+                integration.vendor_user_id = user_id_from_vendor
         
         if existing_token:
             # Update existing token

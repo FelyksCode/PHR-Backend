@@ -7,10 +7,30 @@ from app.config import settings
 from app.database import engine, get_db
 from app.models import User, VendorIntegration, OAuthToken
 from app.models.user import Base
-from app.routers import auth_router, users_router, fhir_router, integrations_router, fitbit_router, health_router
+from app.routers import (
+    auth_router,
+    users_router,
+    fhir_router,
+    integrations_router,
+    fitbit_router,
+    health_router,
+    sync_router,
+)
+from app.workers.sync_worker import sync_worker
+import asyncio
 from app.services.user_service import user_service
 from app.fhir.client import fhir_client
 import httpx
+import logging
+import sys
+
+# Configure application logging to show INFO-level logs in terminal
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -18,7 +38,7 @@ async def lifespan(app: FastAPI):
     # Startup
     # Create tables
     Base.metadata.create_all(bind=engine)
-    
+
     # Create admin user if it doesn't exist
     db = next(get_db())
     try:
@@ -28,7 +48,7 @@ async def lifespan(app: FastAPI):
                 db=db,
                 name="Admin User",
                 email=settings.admin_email,
-                password=settings.admin_password
+                password=settings.admin_password,
             )
             print(f"Created admin user: {settings.admin_email}")
         else:
@@ -37,18 +57,30 @@ async def lifespan(app: FastAPI):
         print(f"Error creating admin user: {e}")
     finally:
         db.close()
-    
+
+    # Start background sync worker
+    worker_task = asyncio.create_task(sync_worker.run_forever())
+
     yield
-    
+
     # Shutdown
-    pass
+    sync_worker.stop()
+    worker_task.cancel()
+    try:
+        await worker_task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # task cancellation or worker shutdown
+        pass
+
 
 # Create FastAPI app
 app = FastAPI(
     title="PHR Backend API",
     description="Personal Health Record Backend with FHIR Integration",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS middleware
@@ -67,6 +99,8 @@ app.include_router(fhir_router)
 app.include_router(integrations_router)
 app.include_router(fitbit_router)
 app.include_router(health_router)
+app.include_router(sync_router)
+
 
 @app.get("/")
 async def root():
@@ -75,8 +109,9 @@ async def root():
         "message": "PHR Backend API",
         "version": "1.0.0",
         "status": "running",
-        "fhir_base_url": settings.fhir_base_url
+        "fhir_base_url": settings.fhir_base_url,
     }
+
 
 @app.get("/health")
 async def health_check():
@@ -84,12 +119,9 @@ async def health_check():
     health_status = {
         "status": "healthy",
         "database": "connected",
-        "fhir": {
-            "url": settings.fhir_base_url,
-            "status": "unknown"
-        }
+        "fhir": {"url": settings.fhir_base_url, "status": "unknown"},
     }
-    
+
     # Check FHIR server connection
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -108,14 +140,16 @@ async def health_check():
     except Exception as e:
         health_status["fhir"]["status"] = f"error: {str(e)}"
         health_status["status"] = "degraded"
-    
+
     return health_status
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
         port=8000,
-        reload=settings.environment == "development"
+        reload=settings.environment == "development",
     )

@@ -210,7 +210,7 @@ class FitbitService:
         date_str: Optional[str] = None
     ) -> Dict[Any, Any]:
         """
-        Fetch heart rate data for a specific date
+        Fetch heart rate intraday data for a specific date
         
         Args:
             db: Database session
@@ -218,12 +218,13 @@ class FitbitService:
             date_str: Date in YYYY-MM-DD format (default: today)
             
         Returns:
-            Heart rate data
+            Heart rate intraday data with timestamps (15-minute intervals)
         """
         if not date_str:
             date_str = date.today().isoformat()
         
-        endpoint = f"/1/user/-/activities/heart/date/{date_str}/1d.json"
+        # Use intraday endpoint for 15-minute detail level to reduce data volume
+        endpoint = f"/1/user/-/activities/heart/date/{date_str}/1d/15min.json"
         return await self._make_api_request(db, vendor_integration_id, endpoint)
     
     async def get_spo2(
@@ -279,7 +280,7 @@ class FitbitService:
         date_str: Optional[str] = None
     ) -> Dict[Any, Any]:
         """
-        Fetch activity summary for a specific date
+        Fetch activity summary (daily total steps) for a specific date
         
         Args:
             db: Database session
@@ -287,12 +288,37 @@ class FitbitService:
             date_str: Date in YYYY-MM-DD format (default: today)
             
         Returns:
-            Activity summary data
+            Activity summary data with daily totals
         """
         if not date_str:
             date_str = date.today().isoformat()
         
+        # Use daily summary endpoint for total steps per day
         endpoint = f"/1/user/-/activities/date/{date_str}.json"
+        return await self._make_api_request(db, vendor_integration_id, endpoint)
+        
+    async def get_calories_timeseries(
+        self,
+        db: Session,
+        vendor_integration_id: int,
+        date_str: Optional[str] = None
+    ) -> Dict[Any, Any]:
+        """
+        Fetch calories intraday data for a specific date
+        
+        Args:
+            db: Database session
+            vendor_integration_id: Integration ID
+            date_str: Date in YYYY-MM-DD format (default: today)
+            
+        Returns:
+            Calories intraday data with timestamps (15-minute intervals)
+        """
+        if not date_str:
+            date_str = date.today().isoformat()
+        
+        # Use intraday endpoint for 15-minute detail level to reduce data volume
+        endpoint = f"/1/user/-/activities/calories/date/{date_str}/1d/15min.json"
         return await self._make_api_request(db, vendor_integration_id, endpoint)
     
     async def fetch_all_health_data(
@@ -331,7 +357,7 @@ class FitbitService:
             "heart_rate": None,
             "spo2": None,
             "body_weight": None,
-            "activity_summary": None
+            "calories_timeseries": None
         }
         
         try:
@@ -352,15 +378,16 @@ class FitbitService:
             results["body_weight"] = await self.get_body_weight(
                 db, integration.id, date_str
             )
+
         except FitbitAPIError as e:
             logger.warning(f"Failed to fetch body weight: {str(e)}")
         
         try:
-            results["activity_summary"] = await self.get_activity_summary(
+            results["calories_timeseries"] = await self.get_calories_timeseries(
                 db, integration.id, date_str
             )
         except FitbitAPIError as e:
-            logger.warning(f"Failed to fetch activity summary: {str(e)}")
+            logger.warning(f"Failed to fetch calories timeseries: {str(e)}")
         
         return results
 

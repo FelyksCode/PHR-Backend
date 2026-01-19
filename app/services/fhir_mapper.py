@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
 import httpx
+import pytz
 
 from app.config import settings
 
@@ -64,7 +65,9 @@ class FHIRMapper:
         value: float,
         unit: str,
         effective_datetime: datetime,
-        additional_data: Optional[Dict[str, Any]] = None
+        additional_data: Optional[Dict[str, Any]] = None,
+        user_timezone: str = "UTC",
+        identifier_override: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Create a FHIR Observation resource
@@ -76,6 +79,8 @@ class FHIRMapper:
             unit: Unit of measurement
             effective_datetime: When the observation was made
             additional_data: Additional metadata
+            user_timezone: User's timezone (default: UTC)
+            identifier_override: Custom identifier value to allow day-level upserts
             
         Returns:
             FHIR Observation resource as dict
@@ -85,8 +90,32 @@ class FHIRMapper:
         
         loinc = self.LOINC_CODES[observation_type]
         
+        # Convert to user's timezone for identifier
+        try:
+            tz = pytz.timezone(user_timezone)
+            if effective_datetime.tzinfo is None:
+                effective_datetime = pytz.UTC.localize(effective_datetime)
+            effective_datetime_local = effective_datetime.astimezone(tz)
+        except:
+            effective_datetime_local = effective_datetime
+        
+        # Create a unique identifier to prevent duplicates
+        # Format: fitbit-{patient_id}-{observation_type}-{date}-{additional_key}
+        effective_date = effective_datetime_local.strftime("%Y%m%d%H%M%S")
+        additional_key = additional_data.get("type", "") if additional_data else ""
+        if identifier_override:
+            identifier_value = identifier_override
+        else:
+            identifier_value = f"fitbit-{patient_id}-{observation_type}-{effective_date}"
+            if additional_key:
+                identifier_value += f"-{additional_key}"
+        
         observation = {
             "resourceType": "Observation",
+            "identifier": [{
+                "system": "http://phr-system.com/observation-id",
+                "value": identifier_value
+            }],
             "status": "final",
             "category": [{
                 "coding": [{
@@ -107,7 +136,7 @@ class FHIRMapper:
                 "reference": f"Patient/{patient_id}"
             },
             "effectiveDateTime": effective_datetime.isoformat(),
-            "issued": datetime.utcnow().isoformat(),
+            "issued": datetime.now(pytz.timezone(user_timezone)).isoformat(),
             "valueQuantity": {
                 "value": value,
                 "unit": unit,
@@ -128,15 +157,18 @@ class FHIRMapper:
         self,
         patient_id: str,
         fitbit_data: Dict[str, Any],
-        last_sync_datetime: Optional[datetime] = None
+        last_sync_datetime: Optional[datetime] = None,
+        user_timezone: str = "UTC"
     ) -> List[Dict[str, Any]]:
         """
-        Map Fitbit heart rate data to FHIR Observations
+        Map Fitbit heart rate intraday data to FHIR Observations
+        Samples data every 2 hours to reduce volume
         
         Args:
             patient_id: FHIR Patient ID
-            fitbit_data: Raw Fitbit heart rate response
-            last_sync_datetime: Last sync datetime to use for effectiveDateTime
+            fitbit_data: Raw Fitbit heart rate intraday response
+            last_sync_datetime: Last sync datetime to filter newer data
+            user_timezone: User's timezone
             
         Returns:
             List of FHIR Observation resources
@@ -144,37 +176,70 @@ class FHIRMapper:
         observations = []
         
         try:
-            activities_heart = fitbit_data.get("activities-heart", [])
-            if not activities_heart:
-                return observations
+            # Check for intraday data first
+            intraday_dataset = fitbit_data.get("activities-heart-intraday", {}).get("dataset", [])
             
-            for day_data in activities_heart:
-                date_str = day_data.get("dateTime")
-                value_data = day_data.get("value", {})
+            if intraday_dataset:
+                # Process intraday data with actual timestamps
+                activities_heart = fitbit_data.get("activities-heart", [])
+                date_str = activities_heart[0].get("dateTime") if activities_heart else None
                 
-                # Resting heart rate
-                resting_hr = value_data.get("restingHeartRate")
-                if resting_hr:
-                    # Use last_sync_datetime if available, otherwise use data date
-                    effective_dt = last_sync_datetime if last_sync_datetime else datetime.fromisoformat(date_str)
-                    obs = self.create_observation(
-                        patient_id=patient_id,
-                        observation_type="heart_rate",
-                        value=float(resting_hr),
-                        unit="beats/min",
-                        effective_datetime=effective_dt,
-                        additional_data={"type": "resting"}
-                    )
-                    observations.append(obs)
+                if date_str:
+                    # Sample every 2 hours (keep observations at 00:00, 02:00, 04:00, 06:00, etc.)
+                    for datapoint in intraday_dataset:
+                        time_str = datapoint.get("time")  # Format: "HH:MM:SS"
+                        value = datapoint.get("value")
+                        
+                        if time_str and value:
+                            # Parse hour from time string
+                            hour = int(time_str.split(":")[0])
+                            
+                            # Only keep data points at 2-hour intervals (0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22)
+                            if hour % 2 != 0:
+                                continue
+                            
+                            # Combine date and time to get full timestamp
+                            datetime_str = f"{date_str}T{time_str}"
+                            effective_dt = datetime.fromisoformat(datetime_str)
+                            
+                            # Skip if before last sync
+                            if last_sync_datetime and effective_dt <= last_sync_datetime:
+                                continue
+                            
+                            obs = self.create_observation(
+                                patient_id=patient_id,
+                                observation_type="heart_rate",
+                                value=float(value),
+                                unit="beats/min",
+                                effective_datetime=effective_dt,
+                                additional_data={"type": "intraday"},
+                                user_timezone=user_timezone
+                            )
+                            observations.append(obs)
+            else:
+                # Fallback to daily summary if intraday not available
+                activities_heart = fitbit_data.get("activities-heart", [])
+                if not activities_heart:
+                    return observations
                 
-                # Heart rate zones (optional, creating observations for each zone)
-                heart_rate_zones = value_data.get("heartRateZones", [])
-                for zone in heart_rate_zones:
-                    if zone.get("minutes", 0) > 0:
-                        # Create observation for time in zone
-                        zone_name = zone.get("name")
-                        minutes = zone.get("minutes")
-                        logger.debug(f"Heart rate zone {zone_name}: {minutes} minutes")
+                for day_data in activities_heart:
+                    date_str = day_data.get("dateTime")
+                    value_data = day_data.get("value", {})
+                    
+                    # Resting heart rate
+                    resting_hr = value_data.get("restingHeartRate")
+                    if resting_hr and date_str:
+                        effective_dt = datetime.now(pytz.timezone(user_timezone))
+                        obs = self.create_observation(
+                            patient_id=patient_id,
+                            observation_type="heart_rate",
+                            value=float(resting_hr),
+                            unit="beats/min",
+                            effective_datetime=effective_dt,
+                            additional_data={"type": "resting"},
+                            user_timezone=user_timezone
+                        )
+                        observations.append(obs)
         
         except Exception as e:
             logger.error(f"Error mapping Fitbit heart rate data: {str(e)}")
@@ -185,7 +250,8 @@ class FHIRMapper:
         self,
         patient_id: str,
         fitbit_data: Dict[str, Any],
-        last_sync_datetime: Optional[datetime] = None
+        last_sync_datetime: Optional[datetime] = None,
+        user_timezone: str = "UTC"
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit SpO2 data to FHIR Observations
@@ -194,6 +260,7 @@ class FHIRMapper:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit SpO2 response
             last_sync_datetime: Last sync datetime to use for effectiveDateTime
+            user_timezone: User's timezone
             
         Returns:
             List of FHIR Observation resources
@@ -207,8 +274,9 @@ class FHIRMapper:
             avg_spo2 = value_data.get("avg")
             
             if avg_spo2 and date_str:
-                # Use last_sync_datetime if available, otherwise use data date
-                effective_dt = last_sync_datetime if last_sync_datetime else datetime.fromisoformat(date_str)
+                # Use user's timezone for the timestamp
+                tz = pytz.timezone(user_timezone)
+                effective_dt = datetime.now(tz)
                 obs = self.create_observation(
                     patient_id=patient_id,
                     observation_type="spo2",
@@ -218,7 +286,8 @@ class FHIRMapper:
                     additional_data={
                         "min": value_data.get("min"),
                         "max": value_data.get("max")
-                    }
+                    },
+                    user_timezone=user_timezone
                 )
                 observations.append(obs)
         
@@ -231,7 +300,8 @@ class FHIRMapper:
         self,
         patient_id: str,
         fitbit_data: Dict[str, Any],
-        last_sync_datetime: Optional[datetime] = None
+        last_sync_datetime: Optional[datetime] = None,
+        user_timezone: str = "UTC"
     ) -> List[Dict[str, Any]]:
         """
         Map Fitbit weight data to FHIR Observations
@@ -240,6 +310,7 @@ class FHIRMapper:
             patient_id: FHIR Patient ID
             fitbit_data: Raw Fitbit weight response
             last_sync_datetime: Last sync datetime to use for effectiveDateTime
+            user_timezone: User's timezone
             
         Returns:
             List of FHIR Observation resources
@@ -248,6 +319,7 @@ class FHIRMapper:
         
         try:
             weight_logs = fitbit_data.get("weight", [])
+            tz = pytz.timezone(user_timezone)
             
             for log in weight_logs:
                 weight = log.get("weight")
@@ -255,12 +327,15 @@ class FHIRMapper:
                 time_str = log.get("time")
                 
                 if weight and date_str:
-                    # Use last_sync_datetime if available, otherwise use data date/time
-                    if last_sync_datetime:
-                        effective_dt = last_sync_datetime
-                    else:
-                        datetime_str = f"{date_str}T{time_str}" if time_str else date_str
+                    # Use actual timestamp if available, otherwise use current time in user's timezone
+                    if time_str:
+                        datetime_str = f"{date_str}T{time_str}"
                         effective_dt = datetime.fromisoformat(datetime_str)
+                        # Make it aware of user's timezone
+                        if effective_dt.tzinfo is None:
+                            effective_dt = tz.localize(effective_dt)
+                    else:
+                        effective_dt = datetime.now(tz)
                     
                     obs = self.create_observation(
                         patient_id=patient_id,
@@ -271,7 +346,8 @@ class FHIRMapper:
                         additional_data={
                             "bmi": log.get("bmi"),
                             "source": log.get("source")
-                        }
+                        },
+                        user_timezone=user_timezone
                     )
                     observations.append(obs)
         
@@ -280,19 +356,22 @@ class FHIRMapper:
         
         return observations
     
-    def map_fitbit_activity(
+    def map_fitbit_calories_timeseries(
         self,
         patient_id: str,
         fitbit_data: Dict[str, Any],
-        last_sync_datetime: Optional[datetime] = None
+        last_sync_datetime: Optional[datetime] = None,
+        user_timezone: str = "UTC"
     ) -> List[Dict[str, Any]]:
         """
-        Map Fitbit activity data to FHIR Observations
+        Map Fitbit calories intraday data to FHIR Observations
+        Persist only the latest value per day and upsert by day-level identifier
         
         Args:
             patient_id: FHIR Patient ID
-            fitbit_data: Raw Fitbit activity response
-            last_sync_datetime: Last sync datetime to use for effectiveDateTime
+            fitbit_data: Raw Fitbit calories intraday response
+            last_sync_datetime: Last sync datetime to filter newer data
+            user_timezone: User's timezone
             
         Returns:
             List of FHIR Observation resources
@@ -300,57 +379,103 @@ class FHIRMapper:
         observations = []
         
         try:
-            summary = fitbit_data.get("summary", {})
-            date_str = fitbit_data.get("activities", [{}])[0].get("startDate") if fitbit_data.get("activities") else None
+            # Check for intraday data first
+            intraday_dataset = fitbit_data.get("activities-calories-intraday", {}).get("dataset", [])
             
-            # Use last_sync_datetime if available, otherwise use data date
-            if last_sync_datetime:
-                effective_dt = last_sync_datetime
+            if intraday_dataset:
+                activities_calories = fitbit_data.get("activities-calories", [])
+                date_str = activities_calories[0].get("dateTime") if activities_calories else None
+                
+                if date_str:
+                    # Get the latest non-null datapoint for the day
+                    latest_datapoint = next(
+                        (dp for dp in reversed(intraday_dataset) if dp.get("value") is not None),
+                        None
+                    )
+                    if latest_datapoint:
+                        time_str = latest_datapoint.get("time")
+                        value = latest_datapoint.get("value")
+                        if time_str and value is not None:
+                            datetime_str = f"{date_str}T{time_str}"
+                            effective_dt = datetime.fromisoformat(datetime_str)
+                            identifier_override = f"fitbit-{patient_id}-calories-{date_str}-daily"
+                            obs = self.create_observation(
+                                patient_id=patient_id,
+                                observation_type="calories",
+                                value=float(value),
+                                unit="kcal",
+                                effective_datetime=effective_dt,
+                                user_timezone=user_timezone,
+                                identifier_override=identifier_override
+                            )
+                           
+                            observations.append(obs)
             else:
-                if not date_str:
-                    # Use current date as fallback
-                    date_str = datetime.now().date().isoformat()
-                effective_dt = datetime.fromisoformat(date_str)
+                # Fallback to daily summary
+                items = fitbit_data.get("activities-calories", [])
+                for item in items:
+                    date_str = item.get("dateTime")
+                    value_str = item.get("value")
+                    if date_str and value_str is not None:
+                        try:
+                            value = float(value_str)
+                        except (TypeError, ValueError):
+                            continue
+                        effective_dt = datetime.now(pytz.timezone(user_timezone))
+                        identifier_override = f"fitbit-{patient_id}-calories-{date_str}-daily"
+                        obs = self.create_observation(
+                            patient_id=patient_id,
+                            observation_type="calories",
+                            value=value,
+                            unit="kcal",
+                            effective_datetime=effective_dt,
+                            user_timezone=user_timezone,
+                            identifier_override=identifier_override
+                        ) 
+                        observations.append(obs)
+        except Exception as e:
+            logger.error(f"Error mapping Fitbit calories timeseries: {str(e)}")
+        
+        return observations
+    
+    def map_fitbit_activity(
+        self,
+        patient_id: str,
+        fitbit_data: Dict[str, Any],
+        last_sync_datetime: Optional[datetime] = None,
+        user_timezone: str = "UTC"
+    ) -> List[Dict[str, Any]]:
+        """
+        Map Fitbit activity data (daily total steps) to FHIR Observations
+        
+        Args:
+            patient_id: FHIR Patient ID
+            fitbit_data: Raw Fitbit activity summary response
+            last_sync_datetime: Last sync datetime (not used for daily summary)
+            user_timezone: User's timezone
             
-            # Steps
+        Returns:
+            List of FHIR Observation resources
+        """
+        observations = []
+        
+        try:
+            # Use daily summary for total steps
+            summary = fitbit_data.get("summary", {})
+            effective_dt = datetime.now(pytz.timezone(user_timezone))
+            
+            # Steps - one observation per day
             steps = summary.get("steps")
-            if steps:
+            if steps and steps > 0:
                 obs = self.create_observation(
                     patient_id=patient_id,
                     observation_type="steps",
                     value=float(steps),
                     unit="steps",
-                    effective_datetime=effective_dt
+                    effective_datetime=effective_dt,
+                    user_timezone=user_timezone
                 )
                 observations.append(obs)
-            
-            # Calories
-            calories = summary.get("caloriesOut")
-            if calories:
-                obs = self.create_observation(
-                    patient_id=patient_id,
-                    observation_type="calories",
-                    value=float(calories),
-                    unit="kcal",
-                    effective_datetime=effective_dt
-                )
-                observations.append(obs)
-            
-            # Distance
-            distances = summary.get("distances", [])
-            for distance in distances:
-                if distance.get("activity") == "total":
-                    dist_value = distance.get("distance")
-                    if dist_value:
-                        obs = self.create_observation(
-                            patient_id=patient_id,
-                            observation_type="distance",
-                            value=float(dist_value),
-                            unit="km",
-                            effective_datetime=effective_dt
-                        )
-                        observations.append(obs)
-                        break
         
         except Exception as e:
             logger.error(f"Error mapping Fitbit activity data: {str(e)}")
@@ -447,7 +572,8 @@ class FHIRMapper:
         observations: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         """
-        Post FHIR Observations to HAPI FHIR server
+        Post FHIR Observations to HAPI FHIR server using conditional create/update
+        to prevent duplicates based on identifier
         
         Args:
             observations: List of FHIR Observation resources
@@ -457,24 +583,39 @@ class FHIRMapper:
         """
         results = {
             "total": len(observations),
-            "success": 0,
+            # created: Observation created
+            "created": 0,
+            # skipped: Observation already existed (idempotent)
+            "skipped": 0,
             "failed": 0,
-            "errors": []
+            "errors": [],
         }
         
         async with httpx.AsyncClient() as client:
             for obs in observations:
                 try:
+                    headers = {"Content-Type": "application/fhir+json"}
+
+                    # Prefer HAPI conditional create to avoid per-resource search roundtrips.
+                    identifier = obs.get("identifier", [])
+                    if identifier and len(identifier) > 0:
+                        identifier_value = identifier[0].get("value")
+                        identifier_system = identifier[0].get("system")
+                        if identifier_value and identifier_system:
+                            headers["If-None-Exist"] = f"identifier={identifier_system}|{identifier_value}"
+
                     response = await client.post(
                         f"{settings.fhir_base_url}/Observation",
                         json=obs,
-                        headers={"Content-Type": "application/fhir+json"},
-                        timeout=30.0
+                        headers=headers,
+                        timeout=30.0,
                     )
-                    
-                    if response.status_code in [200, 201]:
-                        results["success"] += 1
-                        logger.debug(f"Successfully posted observation: {obs.get('code', {}).get('text')}")
+
+                    # HAPI returns 201 when created; for conditional create, it can return 200 when it matched an existing resource.
+                    if response.status_code == 201:
+                        results["created"] += 1
+                    elif response.status_code == 200:
+                        results["skipped"] += 1
                     else:
                         results["failed"] += 1
                         error_msg = f"Failed to post observation: {response.status_code} - {response.text}"
@@ -492,6 +633,8 @@ class FHIRMapper:
                     results["errors"].append(error_msg)
                     logger.error(error_msg)
         
+        # Backward-compatible counters for legacy code paths
+        results["success"] = results["created"]
         return results
 
 

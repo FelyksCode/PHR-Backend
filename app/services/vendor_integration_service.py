@@ -1,6 +1,7 @@
 """
 Service for managing vendor integrations
 """
+import pytz
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from typing import Optional, List
@@ -41,7 +42,8 @@ class VendorIntegrationService:
         if existing:
             # Reactivate if it was disabled
             existing.is_active = True
-            existing.updated_at = datetime.utcnow()
+            jakarta_tz = pytz.timezone('UTC')
+            existing.updated_at = datetime.now(jakarta_tz)
             db.commit()
             db.refresh(existing)
             return existing
@@ -124,8 +126,9 @@ class VendorIntegrationService:
         ).first()
         
         if integration:
-            integration.last_sync_at = datetime.utcnow()
-            integration.updated_at = datetime.utcnow()
+            jakarta_tz = pytz.timezone('UTC')
+            integration.last_sync_at = datetime.now(jakarta_tz)
+            integration.updated_at = datetime.now(jakarta_tz)
             db.commit()
     
     def deactivate_integration(
@@ -146,14 +149,51 @@ class VendorIntegrationService:
         integration = db.query(VendorIntegration).filter(
             VendorIntegration.id == integration_id
         ).first()
-        
+        jakarta_tz = pytz.timezone('UTC')
+
         if integration:
             integration.is_active = False
-            integration.updated_at = datetime.utcnow()
+            integration.updated_at = datetime.now(jakarta_tz)
             db.commit()
             return True
         
         return False
+    
+    def disconnect_integration(
+        self,
+        db: Session,
+        user_id: int,
+        vendor: str
+    ) -> bool:
+        """
+        Disconnect a vendor integration by deactivating it and removing OAuth tokens
+        
+        Args:
+            db: Database session
+            user_id: User ID
+            vendor: Vendor name
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        from app.services.oauth_token_service import oauth_token_service
+        
+        # Get the integration
+        integration = self.get_integration(db, user_id, vendor)
+        
+        if not integration:
+            return False
+        
+        # Delete OAuth tokens
+        oauth_token_service.delete_tokens(db, integration.id)
+        
+        # Deactivate the integration
+        jakarta_tz = pytz.timezone('UTC')
+        integration.is_active = False
+        integration.updated_at = datetime.now(jakarta_tz)
+        db.commit()
+        
+        return True
 
 
 vendor_integration_service = VendorIntegrationService()
